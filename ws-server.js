@@ -24,7 +24,7 @@ wss1.on('connection', function connection(ws) {
   }
     
   ws.on('message', function incoming(message) {
-    //console.log('received '+ new Date());
+    console.log('received '+ new Date());
     wss2.clients.forEach(function each(client) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(message);
