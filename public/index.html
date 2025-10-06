@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Camera Stream over WebSocket</title>
+    <style>
+      :root{--bg:#0f1724;--card:#0b1220;--accent:#06b6d4;--muted:#94a3b8;color-scheme:dark}
+      html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+      body{display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#071029 0%,#041025 100%);color:#e6eef6}
+      .container{max-width:1100px;width:95%;display:grid;grid-template-columns:1fr 420px;gap:20px}
+      @media(max-width:900px){.container{grid-template-columns:1fr}}
+      .card{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.03);padding:16px;border-radius:12px}
+      header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+      header h1{font-size:18px;margin:0}
+      .video-wrap{position:relative;border-radius:8px;overflow:hidden;background:#000;height:360px;display:flex;align-items:center;justify-content:center}
+      video{width:100%;height:100%;object-fit:cover;background:#000}
+      canvas{display:none}
+      .controls{display:flex;flex-direction:column;gap:8px}
+      select,input[type=number]{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+      .row{display:flex;gap:8px}
+      button{background:var(--accent);border:none;color:#032;padding:10px 12px;border-radius:8px;font-weight:600;cursor:pointer}
+      button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--muted)}
+      .viewer{display:flex;flex-direction:column;gap:8px}
+      .received{background:#000;border-radius:6px;overflow:hidden;height:240px;display:flex;align-items:center;justify-content:center}
+      img.received-img{width:100%;height:100%;object-fit:contain}
+      footer{margin-top:8px;font-size:12px;color:var(--muted)}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <header>
+          <h1>Camera Preview</h1>
+          <div id="status">idle</div>
+        </header>
+
+        <div class="video-wrap" id="videoWrap">
+          <video id="preview" autoplay playsinline muted></video>
+          <canvas id="frameCanvas"></canvas>
+        </div>
+
+        <div class="controls" style="margin-top:12px">
+          <label>Camera</label>
+          <select id="cameraSelect"></select>
+
+          <div class="row">
+            <label style="flex:1">FPS</label>
+            <input id="fps" type="number" min="1" max="30" value="10" />
+          </div>
+
+          <div class="row">
+            <button id="startBtn">Start streaming</button>
+            <button id="stopBtn" class="ghost" disabled>Stop</button>
+          </div>
+          <footer>Captures frames to JPEG and sends over WebSocket to <code>/server</code>.</footer>
+        </div>
+      </div>
+
+      <div class="card viewer" style="display: none;">
+        <header>
+          <h1>Viewer</h1>
+          <div id="viewerStatus">disconnected</div>
+        </header>
+        <label>Viewer mode receives frames from server</label>
+        <div class="received" id="receivedBox">
+          <img id="receivedImg" class="received-img" alt="No stream" />
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="connectViewer">Connect viewer</button>
+          <button id="disconnectViewer" class="ghost" disabled>Disconnect</button>
+        </div>
+        <footer>Open this page in another browser/device and connect viewer to watch the stream.</footer>
+      </div>
+    </div>
+
+    <script>
+    // Minimal helper logger
+    const log = (...args) => { console.log(...args); document.getElementById('status').textContent = args.join(' '); };
+
+    const preview = document.getElementById('preview');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const fpsInput = document.getElementById('fps');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const canvas = document.getElementById('frameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let localStream = null;
+    let captureTimer = null;
+    let ws = null;
+
+    async function enumerateCameras(){
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter(d => d.kind === 'videoinput');
+      cameraSelect.innerHTML = '';
+      cams.forEach((cam, idx) => {
+        const opt = document.createElement('option');
+        opt.value = cam.deviceId;
+        opt.textContent = cam.label || `Camera ${idx+1}`;
+        cameraSelect.appendChild(opt);
+      });
+      if(cams.length===0){
+        const opt = document.createElement('option'); opt.textContent = 'No camera found'; cameraSelect.appendChild(opt);
+      }
+    }
+
+    async function startPreview(deviceId){
+      if(localStream){
+        localStream.getTracks().forEach(t=>t.stop());
+        localStream = null;
+      }
+      const constraints = { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal:1280 }, height:{ideal:720} }, audio:false };
+      localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      preview.srcObject = localStream;
+      await preview.play().catch(()=>{});
+      // set canvas size
+      const track = localStream.getVideoTracks()[0];
+      const settings = track.getSettings();
+      canvas.width = settings.width || preview.videoWidth || 640;
+      canvas.height = settings.height || preview.videoHeight || 360;
+      log('preview running');
+    }
+
+    cameraSelect.addEventListener('change', () => {
+      // if the option value is empty (some browsers hide deviceId before permission),
+      // pass undefined so getUserMedia uses the default camera
+      const val = cameraSelect.value || undefined;
+      startPreview(val).catch(e=>console.error(e));
+    });
+
+    startBtn.addEventListener('click', async () => {
+      const selected = cameraSelect.options[cameraSelect.selectedIndex];
+      if(!selected || selected.text === 'No camera found'){
+        alert('Choose a camera first');
+        return;
+      }
+      // allow empty deviceId -> undefined to let the browser choose default device
+      const deviceId = cameraSelect.value || undefined;
+      await startPreview(deviceId);
+      // open websocket to /server
+      const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${protocol}://${location.host}/server`);
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = ()=>{
+        log('ws open');
+        startCapturing();
+        startBtn.disabled = true; stopBtn.disabled = false;
+      };
+      ws.onclose = ()=>{ log('ws closed'); stopCapturing(); startBtn.disabled = false; stopBtn.disabled = true; };
+      ws.onerror = (e)=>{ console.error('ws err',e); };
+    });
+
+    stopBtn.addEventListener('click', ()=>{
+      if(ws) ws.close();
+      stopCapturing();
+      startBtn.disabled = false; stopBtn.disabled = true;
+    });
+
+    function startCapturing(){
+      const fps = Math.max(1, Math.min(30, parseInt(fpsInput.value)||10));
+      const interval = 1000 / fps;
+      captureTimer = setInterval(async ()=>{
+        if(!preview.videoWidth) return;
+        canvas.width = preview.videoWidth;
+        canvas.height = preview.videoHeight;
+        ctx.drawImage(preview,0,0,canvas.width,canvas.height);
+        // encode to JPEG blob (quality 0.7) then send arrayBuffer with small header
+        canvas.toBlob(async (blob)=>{
+          if(!ws || ws.readyState !== WebSocket.OPEN) return;
+          // send raw JPEG bytes
+          const ab = await blob.arrayBuffer();
+          ws.send(ab);
+        }, 'image/jpeg', 0.7);
+      }, interval);
+      log('capturing');
+    }
+
+    function stopCapturing(){
+      if(captureTimer) { clearInterval(captureTimer); captureTimer = null; }
+      log('stopped');
+    }
+
+    // Viewer code
+    const connectViewerBtn = document.getElementById('connectViewer');
+    const disconnectViewerBtn = document.getElementById('disconnectViewer');
+    const receivedImg = document.getElementById('receivedImg');
+    const viewerStatus = document.getElementById('viewerStatus');
+    let viewerWs = null;
+
+    connectViewerBtn.addEventListener('click', ()=>{
+      const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+      viewerWs = new WebSocket(`${protocol}://${location.host}/`);
+      viewerWs.binaryType = 'arraybuffer';
+      viewerWs.onopen = ()=>{ viewerStatus.textContent = 'connected'; connectViewerBtn.disabled = true; disconnectViewerBtn.disabled = false; };
+      viewerWs.onmessage = (evt)=>{
+        // expect binary JPEG
+        const buf = evt.data;
+        if(typeof buf === 'string') return; // ignore text
+        const blob = new Blob([buf], {type:'image/jpeg'});
+        const url = URL.createObjectURL(blob);
+        receivedImg.src = url;
+        // revoke after rendered to free memory
+        setTimeout(()=>URL.revokeObjectURL(url), 2000);
+      };
+      viewerWs.onclose = ()=>{ viewerStatus.textContent = 'disconnected'; connectViewerBtn.disabled = false; disconnectViewerBtn.disabled = true; };
+    });
+
+    disconnectViewerBtn.addEventListener('click', ()=>{ if(viewerWs) viewerWs.close(); });
+
+    // Startup
+    (async ()=>{
+      if(!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        alert('Your browser does not support media device enumeration');
+        return;
+      }
+      await enumerateCameras();
+      // select first option if any
+      if(cameraSelect.options.length>0){
+        cameraSelect.selectedIndex = 0;
+        const deviceId = cameraSelect.value || undefined;
+        startPreview(deviceId).catch(e=>console.error(e));
+      }
+    })();
+    </script>
+  </body>
+</html>
