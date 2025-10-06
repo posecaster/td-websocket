@@ -89,6 +89,8 @@
     let localStream = null;
     let captureTimer = null;
     let ws = null;
+  let wakeLock = null;
+  let heartbeatTimer = null;
 
     async function enumerateCameras(){
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -145,6 +147,8 @@
       ws.onopen = ()=>{
         log('ws open');
         startCapturing();
+        startHeartbeat();
+        requestWakeLock().catch(()=>{});
         startBtn.disabled = true; stopBtn.disabled = false;
       };
       ws.onclose = ()=>{ log('ws closed'); stopCapturing(); startBtn.disabled = false; stopBtn.disabled = true; };
@@ -154,6 +158,8 @@
     stopBtn.addEventListener('click', ()=>{
       if(ws) ws.close();
       stopCapturing();
+      stopHeartbeat();
+      releaseWakeLock().catch(()=>{});
       startBtn.disabled = false; stopBtn.disabled = true;
     });
 
@@ -179,6 +185,39 @@
     function stopCapturing(){
       if(captureTimer) { clearInterval(captureTimer); captureTimer = null; }
       log('stopped');
+    }
+
+    // Heartbeat: small JSON pings to keep mobile NAT/firewalls and server aware of client
+    function startHeartbeat(){
+      stopHeartbeat();
+      if(!ws) return;
+      heartbeatTimer = setInterval(()=>{
+        try{
+          if(ws && ws.readyState === WebSocket.OPEN){
+            ws.send(JSON.stringify({t:'ping', ts: Date.now()}));
+          }
+        }catch(e){ console.warn('heartbeat send failed', e); }
+      }, 15000); // every 15s
+      log('heartbeat started');
+    }
+    function stopHeartbeat(){ if(heartbeatTimer){ clearInterval(heartbeatTimer); heartbeatTimer = null; log('heartbeat stopped'); } }
+
+    // Wake lock (Screen Wake Lock API) to keep mobile screen awake while streaming
+    async function requestWakeLock(){
+      try{
+        if('wakeLock' in navigator){
+          wakeLock = await navigator.wakeLock.request('screen');
+          wakeLock.addEventListener('release', () => { log('wakeLock released'); wakeLock = null; });
+          log('wakeLock acquired');
+        } else {
+          log('wakeLock unsupported');
+        }
+      }catch(err){ console.warn('wakeLock request failed', err); }
+    }
+    async function releaseWakeLock(){
+      try{
+        if(wakeLock){ await wakeLock.release(); wakeLock = null; }
+      }catch(err){ console.warn('wakeLock release failed', err); }
     }
 
     // Viewer code
