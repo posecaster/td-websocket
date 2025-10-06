@@ -1,0 +1,49 @@
+<!-- full screen ws video viewer-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebSocket Video Stream</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body style="margin:0; padding:0; overflow:hidden;background-color: black;">
+      <img id="receivedImg" alt="Received Image" width="100%"
+         style="object-fit: contain; height: 100vh;"
+      />
+  <script>
+    const video = document.getElementById('video');
+    const status = document.getElementById('status');
+
+    // Connect to WebSocket server
+    const ws = new WebSocket(`ws://${window.location.host}/`);
+
+    ws.onopen = () => {
+      status.textContent = 'connected';
+      console.log('WebSocket connection opened');
+    };
+
+    ws.onclose = () => {
+      status.textContent = 'disconnected';
+      console.log('WebSocket connection closed');
+    };
+
+    ws.onerror = (error) => {
+      status.textContent = 'error';
+      console.error('WebSocket error:', error);
+    };
+
+    // Handle incoming video stream data
+    ws.onmessage = (event) => {
+        const img = document.getElementById('receivedImg');
+        const buf = event.data;
+        if(typeof buf === 'string') return; // ignore text
+        const blob = new Blob([buf], {type:'image/jpeg'});
+        const url = URL.createObjectURL(blob);
+        img.src = url;
+        // revoke after rendered to free memory
+        setTimeout(()=>URL.revokeObjectURL(url), 2000);
+    };
+  </script>
+</body>
+</html>
