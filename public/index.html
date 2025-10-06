@@ -222,6 +222,55 @@
         startPreview(deviceId).catch(e=>console.error(e));
       }
     })();
+
+    // Picture-in-Picture (PiP) behavior:
+    // When the page becomes hidden, try to enter PiP so the preview stays visible.
+    // When the page becomes visible again, exit PiP. Some browsers require a user gesture
+    // to initiate PiP; failures are caught and logged.
+    function isVideoLikelyPlaying(video){
+      try {
+        return !!(video && !video.paused && !video.ended && video.readyState > 2);
+      } catch(e){ return false; }
+    }
+
+    document.addEventListener('visibilitychange', async ()=>{
+      if(document.hidden){
+        // request PiP only if supported and not already in PiP
+        if('pictureInPictureEnabled' in document && document.pictureInPictureEnabled){
+          if(!document.pictureInPictureElement){
+            try{
+              // ensure video is playing (some browsers require it)
+              if(!isVideoLikelyPlaying(preview)){
+                await preview.play().catch(()=>{});
+              }
+              await preview.requestPictureInPicture();
+              log('PiP entered');
+            }catch(err){
+              console.warn('requestPictureInPicture failed:', err);
+              // don't interrupt user flow — keep logging the state
+              log('PiP not available');
+            }
+          }
+        }
+      }else{
+        // if coming back to page and PiP is active, exit PiP
+        if(document.pictureInPictureElement){
+          try{
+            await document.exitPictureInPicture();
+            log('PiP exited');
+          }catch(err){
+            console.warn('exitPictureInPicture failed:', err);
+          }
+        }
+      }
+    });
+
+    preview.addEventListener('enterpictureinpicture', (e)=>{
+      log('preview PiP active');
+    });
+    preview.addEventListener('leavepictureinpicture', (e)=>{
+      log('preview PiP stopped');
+    });
     </script>
   </body>
 </html>
